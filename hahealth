@@ -1,0 +1,850 @@
+#!/bin/bash
+
+ # Copyright (C) 2013 Jan Kalcic <jkalcic@suse.com>
+ # 
+ # This program is free software; you can redistribute it and/or
+ # modify it under the terms of the GNU General Public
+ # License as published by the Free Software Foundation; either
+ # version 2.1 of the License, or (at your option) any later version.
+ # 
+ # This software is distributed in the hope that it will be useful,
+ # but WITHOUT ANY WARRANTY; without even the implied warranty of
+ # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ # General Public License for more details.
+ # 
+ # You should have received a copy of the GNU General Public
+ # License along with this library; if not, write to the Free Software
+ # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ #
+
+VER="1.0"
+HB_REPORT="/usr/sbin/hb_report"
+
+usage() {
+cat<<EOF
+hahealth - A tool for performing a basic health check for Linux-HA clusters
+usage: hahealth	[options]
+-d: hb_report destination directory. Default is current directory
+-h: this text
+-v: print version
+EOF
+exit
+}
+version() {
+	echo "${VER}"
+	exit
+}
+
+######
+#### lets make sure this is a cluster and pacemaker is running
+##
+error() {
+	echo -e "ERROR: $*" >&2
+	exit 1
+}
+haverify() {
+	test -x ${HB_REPORT} || error "${HB_REPORT}: command not found"
+	rpm -q pacemaker >/dev/null 2>&1 || error "Linux-HA packages not installed"
+	crm_mon -r1 >/dev/null 2>&1 || error $(crm_mon -r1)
+}
+
+######
+#### get and set variables
+##
+setvars() {
+	# reset status
+	GSTATUS="0"
+	
+	# default value for mandatory var in case config file does not exist
+	# TODO define the default behavior
+	FROM_TIME="1 day ago"
+	SAVE_HB_REPORT="1"
+
+	# read vars from config file. $FROM_TIME above could be overrided
+	[ -r /etc/hahealth.conf ] && . /etc/hahealth.conf
+
+	# force report creation if option -d is specified
+	if [ "$REPORT_DIR" ] ; then
+		SAVE_HB_REPORT="1"
+	else
+		# if not specified, where do we create hb_report?
+		local d=$(date +"%a-%d-%b-%Y")
+		if [ $SAVE_HB_REPORT ] ; then
+			REPORT_DIR="$PWD/hb_report" # current dir if asked to save it
+		else
+			REPORT_DIR=/tmp/hb_report-${d} # tmp dir if asked to not save it
+		fi
+	fi
+}
+
+######
+#### Output formatting
+##
+header() {
+        hline
+        eout
+        eout "          Linux-HA Health Check Report Tool v${VER} - $(date '+%F %T')"
+        eout
+        hline
+        eout
+}
+footer() {
+	#TODO do no print out output file if not saved
+        eout
+        hline
+        eout "Status: $(print_gstatus)"
+	[ "$REPORT_DIR" = "not saved" ] || eout "Report dir: ${REPORT_DIR}"
+	eout "Base: hb_report from: \"${FROM_TIME}\" until \"${TO_TIME}\""
+        hline
+}
+hline() {
+	# 80 is the default shell widht (80)
+        for (( i=0; i < 80; i++ ))
+        do
+  	      printf "#"
+        done
+        eout
+}
+pout() {
+	# 68 is the default shell widht (80) minus the space for printing lstatus (12)
+        printf "%-68s " "$*"
+}
+eout() {
+        echo -e "$@"
+}
+print_lstatus() {
+        case $LSTATUS in
+	        0) eout "[  Green  ]"; test -n "$2" && { eout " $2"; eout; } ;;
+        	1) eout "[ Yellow  ]"; eout "$1"; eout ;;
+	        2) eout "[   Red   ]"; eout "$1"; eout ;;
+        esac
+}
+print_gstatus() {
+	case $GSTATUS in
+	        0) echo "Healthy" ;;
+	        1) echo "Yellow Flag" ;;
+	        2) echo "Red Flag" ;;
+        esac
+}
+reset_lstatus() {
+        LSTATUS=0
+}
+set_status() {
+        case $1 in
+	        green)  	LSTATUS=0; test $GSTATUS -lt $LSTATUS && GSTATUS=$LSTATUS ;;
+        	yellow)	 	LSTATUS=1; test $GSTATUS -lt $LSTATUS && GSTATUS=$LSTATUS ;;
+	        red)    	LSTATUS=2; test $GSTATUS -lt $LSTATUS && GSTATUS=$LSTATUS ;;
+        esac
+}
+
+######
+#### prepare arguments for and run hb_report
+##
+settimeargs() {
+	local t
+
+	# set "time to start from" argument for hb_report (mandatory)
+        if [ -n "$FROM_TIME" ] ; then
+                if [[ "$FROM_TIME" == *ago* ]] ; then
+                        t=`date '+%F %H:%M' --date="$FROM_TIME"`
+                 	ARGS="-f \"${t}\""
+		else
+	                ARGS="-f \"${FROM_TIME}\""
+		fi
+        else
+                # TBD change this to read from user input
+                error "time to start from not specified"
+                exit 1
+        fi
+
+	# set "time to finish at" argument for hb_report (optional)
+        if [ -n "$TO_TIME" ] ; then
+                if [[ "$TO_TIME" == *ago* ]] ; then
+                        t=`date '+%F %H:%M' --date="$TO_TIME"`
+                        ARGS="$ARGS -t \"$t\""
+		else
+                        ARGS="$ARGS -t \"$TO_TIME\""
+
+		fi
+        else
+		# this is only for user output, it will not passed to hb_report
+                TO_TIME="now"
+        fi
+}
+setotherargs() {
+	
+	[ "${NODES_SOURCE}" ] &&
+		ARGS="$ARGS -n \"${NODES_SOURCE}\""
+
+	[ "${SSH_USER}" ] &&
+		ARGS="$ARGS -u ${SSH_USER}"
+	
+	[ "${HA_LOG}" ] &&
+		ARGS="$ARGS -l ${HA_LOG}"
+	
+	[ "${NO_EXTRA_LOGS}" ] &&
+		ARGS="$ARGS -M"
+	
+	[ "${DO_SANITIZE}" ] &&
+		ARGS="$ARGS -s"
+	
+	[ "${SANITIZE}" ] &&
+		ARGS="$ARGS -p ${SANITIZE}"
+
+	[ "${LOG_PATTERNS}" ] &&
+		ARGS="$ARGS -L ${LOG_PATTERNS}"
+
+	[ "${NO_SSH}" ] &&
+		ARGS="$ARGS -S"
+	
+	[ "${EXTRA_LOGS}" ] &&
+		ARGS="$ARGS -E ${EXTRA_LOGS}"
+
+	[ "${OPENAIS_CLUSTER}" ] &&
+		ARGS="$ARGS -A"
+
+	[ "${COMPRESS}" ] ||
+		ARGS="$ARGS -d"
+}
+setreportargs() {
+	settimeargs
+	setotherargs
+	
+	# as we should run as a kind of unattended mode, always don't ask for description (-D)
+	# and always remove dest if exit (-Z)
+	ARGS="$ARGS -D -Z"
+	
+	# add dest dir ( create by setvars() )
+	ARGS="$ARGS $REPORT_DIR"
+}
+createreport() {
+	echo -e "Please wait while creating hb_report..."
+
+	echo $ARGS | xargs $HB_REPORT >/dev/null 2>&1 || error "Failed to create report"
+}
+
+######
+#### all the checks below
+##
+checkdiff() {
+       	pout "Core Files Comparison"
+        reset_lstatus
+	
+	IFS_BCK=$IFS
+	IFS=$'\n'
+	local differences
+	local diff="$(grep -i ^diff $analysis 2>/dev/null)"
+	for d in $diff; do
+		local dstatus="$(echo -e "$d" | cut -d " " -f 3)"
+		[ "$dstatus" != "OK" ] && [ "$dstatus" != "no" ] &&
+			differences="${differences}`echo $d | cut -d " " -f 2`"
+	done
+
+	if [ "$differences" ] ; then
+		set_status red
+		print_lstatus " WARN: Some differences found ($differences)"
+	else
+		set_status green
+		print_lstatus
+	fi
+	IFS=$IFS_BCK
+}
+checkperms() {
+       	pout "Core Files Permissions/Ownerwship"
+        reset_lstatus
+	
+	local perms=$(grep -A1 -E '^WARN: problem with permissions/ownership|^wrong permissions or ownership' $analysis | sed -e 's/^/ /' )
+
+	if [ "$perms" ] ; then
+		set_status red
+		print_lstatus "$perms" 
+	else
+		set_status green 
+		print_lstatus
+	fi
+}
+checkcrmverify() {
+       	pout "CIB consistency"
+        reset_lstatus
+	
+	local crmver=$(grep -E '^WARN: crm_verify|^crm_verify' $analysis | sed -e 's/^/ /' )
+
+	if [ "$crmver" ] ; then
+		set_status red
+		print_lstatus "$crmver" 
+	else
+		set_status green 
+		print_lstatus
+	fi
+
+}
+checktraces() {
+       	pout "Backtraces"
+        reset_lstatus
+	
+	local traces=$(grep -E '^WARN: coredumps found at|Core was generated|Program terminated' $analysis | sed -e 's/^/ /' )
+
+	if [ "$traces" ] ; then
+		set_status red
+		print_lstatus "$traces" 
+	else
+		set_status green 
+		print_lstatus
+	fi
+}
+checkerrors() {
+       	pout "Errors Log"
+        reset_lstatus
+	
+	local error=$(sed -e '1,/^Log pattern/d' $analysis | wc -l)
+
+	if [ "$error" -gt "0" ] ; then
+		set_status red
+		print_lstatus " WARN: $error errors found. Check file \"analysis.txt\" from hb_report"
+	else
+		set_status green 
+		print_lstatus
+	fi
+}
+checkevents() {
+       	pout "Events Collection"
+        reset_lstatus
+	
+	local f="${REPORT_DIR}/events.txt"
+
+	if [ ! -e $f ] ; then
+		set_status red 
+		print_lstatus " \"events.txt\" file not found ($f)" 
+	elif [ -s $f ] ; then
+		set_status yellow
+		local events=$(cat $f 2>/dev/null | wc -l)
+		print_lstatus " INFO: $events events found. Check file \"events.txt\" from hb_report"
+	else
+		set_status green 
+		print_lstatus
+	fi
+}
+checkreport() {
+       	pout "Report Integrity"
+        reset_lstatus
+	
+	analysis="${REPORT_DIR}/analysis.txt"
+	
+	if [ ! -s "$analysis" ] ; then 
+		set_status red 
+		print_lstatus " ERROR: file \"analysis.txt\" not found! Checks on hb_report will be skipped" 
+		return
+	else
+		set_status green 
+		print_lstatus 
+	fi
+
+	checkdiff
+	checkperms
+	checkcrmverify
+	checktraces
+	checkerrors
+	checkevents
+	
+	# TODO check for time in sync
+}
+
+#
+# check basics in the configuration
+#
+checkquorum() {
+       	pout "Quorum"
+        reset_lstatus
+	
+	local warnings
+
+	# 1. check for quorum misconfguration in a two-nodes cluster
+	local qpolicy=$(crm_attribute -Q -G -n no-quorum-policy 2>/dev/null) 
+	[ "$qpolicy" ] || qpolicy="stop"
+
+	local nodesnum=$(echo -e "$NODES" | wc -w)
+
+	if [ "$nodesnum" -lt "3" -a "$qpolicy" != "ignore" ] ; then 
+                warnings="${warnings} WARN: no-quorum-policy=\"${qpolicy}\" set for a two-nodes cluster (should be \"ignore\")\n"
+	fi
+
+	# 2. check for quorum status
+	if ! echo $CRMMON | grep -qs 'with quorum' ; then 
+		warnings="${warnings} WARN: cluster partition is WITHOUT quorum\n"
+	fi
+
+	# 3. notify if a node is not available
+	local y n
+        for i in $NODES ; do
+		if echo "$CRMMON" | grep -E '^Online|online$' | grep -qs $i ; then
+			y="${y} ${i}"
+		else
+			n="${n} ${i}"
+		fi
+	done
+        if [ "$n" ] ; then
+		warnings="${warnings} INFO: nodes in this cluster partition:$y\n"
+		warnings="${warnings} INFO: nodes NOT in this cluster partition:$n"
+	fi
+
+	if [ "$warnings" ] ; then
+		set_status red
+		print_lstatus "${warnings}"
+	else
+		set_status green
+		print_lstatus
+	fi
+}
+checkstonith() {
+       	pout "STONITH"
+        reset_lstatus
+
+	# 1. first, make sure stonith is enabled. Else we are done..
+	local s=$(crm_attribute -Q -G -n stonith-enabled 2>/dev/null)
+	if [ "$s" == "false" ] ; then
+		set_status red 
+		print_lstatus " WARN: stonith disabled!\n"
+		return 1
+	fi
+	
+	local warnings
+
+	# 2. check for stonith-action and warns if set to a non-default value, which is poweroff
+	if crm_attribute -Q -G -n stonith-action >/dev/null 2>&1 ; then
+                warnings=" WARN: stonith-action set to poweroff\n"
+	fi
+
+	# 3. get stonith-timeout. needed later to verify timeouts mismatch 
+	if crm_attribute -Q -G -n stonith-timeout >/dev/null 2>&1 ; then
+		s_timeout=$(crm_attribute -Q -G -n stonith-timeout | sed -e s/[a-zA-Z]$//g)
+	else 
+		s_timeout="60"
+	fi
+	
+	# 4. recommened node fencing in use?  TODO some checks for other fencing methods as well
+	local conf=/etc/sysconfig/sbd
+	if [ ! -s "$conf" ] ; then
+                warnings="${warnings} WARN: SBD fencing (recommended) not in use\n"
+		set_status yellow 
+		print_lstatus "${warnings}"
+		return 1
+	fi
+
+	# 5. config file contains device?
+        SBD=$(awk -F"=" '$1=="SBD_DEVICE" {print $2}' $conf | tr -d "\""|tr ";" "\n" )
+	if [ ! "$SBD" ] ; then
+                warnings="${warnings} WARN: SBD device not specified in ${conf}\n"
+		set_status red
+		print_lstatus "${warnings}"
+		return 1
+	fi
+
+	# 6. some checks for each SBD device
+	for d in $SBD ; do
+		
+		# 6.1 TBD device is accessible?
+		if [ ! -b $d ] ; then
+                	warnings="${warnings} WARN: SBD device not found:\n $d\n"
+			set_status red
+			print_lstatus "${warning}"
+			return 1
+		fi
+		
+		# 6.2 udev symlinks are used?
+		[ $(echo $d | cut -d "/" -f1,2,3) == "/dev/disk" ] ||
+                	warnings="${warnings} WARN: udev symlink not in use:\n\t$d\n"
+	
+		# 6.3 timeouts mismatch? (stonith-timeout should never be less than 120% of msgwait)
+		timeouts=$(sbd -d $d dump | grep -E 'watchdog|msgwait' | cut -d":" -f2 | sed -e 's/ //g')
+		watchdog=$(echo $timeouts | cut -d " " -f1)
+		msgwait=$(echo $timeouts | cut -d " " -f2)
+
+		[ "$s_timeout" -ge $(((( ${msgwait} /10 ) *2 ) + $msgwait )) ] ||
+			warnings="${warnings} WARN: stonith-timeout too low for SBD timeouts:\n\tstonith-timeout :\t${s_timeout}\n\tTimeout (watchdog) :\t${watchdog}\n\tTimeout (msgwait) :\t${msgwait}\n"
+	done
+
+	# 7. softdog module is loaded
+	if ! lsmod | grep -qs 'softdog' ; then
+		warnings="${warnings} WARN: softdog module not loaded, is a watchdog in use?\n"
+	fi
+	
+	# 8. verify external/sbd STONITH agent is running
+	local agent=$(crm_mon -r -1 | grep "(stonith:external/sbd)")
+	agent=$(echo "$agent" | grep "Started")
+	if [ ! "$agent" ] ; then
+               	warnings="${warnings} WARN: external/sbd STONITH agent is not running\n"
+		set_status red
+		print_lstatus "${warnings}"
+		return 1
+	fi
+
+	# 9. final output
+	if [ "$warnings" ] ; then
+		set_status yellow
+		print_lstatus "${warnings}"
+	else
+		set_status green
+		print_lstatus
+	fi
+}
+getnodes() { 
+	cibadmin -Ql -o nodes | awk '
+        	/type="normal"/ {
+                	for( i=1; i<=NF; i++ )
+                        	if( $i~/^uname=/ ) {
+                                	sub("uname=.","",$i);
+	                                sub("\".*","",$i);
+        	                        print $i;
+	                                next;
+        	                }
+	          }
+	        ' | tr '\n' ' '
+}
+checkrscstatus() {
+	local rlist s 
+	local b=/usr/sbin/crm_resource
+	for r in $RESOURCES ; do
+		# crm_resource output is empty when rsc is not running. Weird handling (bug?) of sterr and stout
+		s=$($b -W -r $r -Q 2>/dev/null)
+		[ "$s" ] || rlist="${rlist} ${r}"
+	done  
+	echo -e "$rlist"	
+}
+checkrscfailcount() {
+	local b=/usr/sbin/crm_failcount
+        for n in $NODES ; do
+                for r in $RESOURCES ; do
+                        failcount=$($b -G -U $n -r $r | awk -F= '{ for(i=1; i<NF; i++) { if ( $i ~ /value/ ) { i++; print $i; }}}' )
+			if [ "$failcount" != "0" ] ; then
+	                        echo -ne "\n ${r} : "
+	                        echo -e "$failcount on ${n}\n"
+			fi
+                done
+        done
+}
+#checkstikiness() {
+#	# Scope: find resource not running on the preferred node and which might migrate at some point
+#
+#	# 1. get allocation score for a resource on each node. 
+#	ptest -Ls | grep -E stonith-sbd | grep -E sles11sp2-ha-1
+#
+#	# 2. get stickiness
+#        if ! stickiness=`crm_resource -g resource-stickiness -r $res --meta -Q 2>/dev/null`
+#        then
+#                # if no resource-specific stickiness is confiugured, use the default value
+#                stickiness="$default_stickiness"
+#        fi
+#
+#	# 3. compare score with stickiness
+#	# if score on nodes where the resource is not running is higher (is preferred) than score + stickiness for the current node, it is failback?
+#
+#	# 3.1 where is running?
+#	# /usr/sbin/crm_resource -W -r $rsc -Q
+#
+#	# 3.2 score for this node
+#	# ptest -Ls | grep $rsc | grep sles11sp2-ha-1
+#
+#	# 3.2 score on the other nodes
+#	# ptest -Ls | grep $rsc | grep -v sles11sp2-ha-1
+#
+#	# 3.3 stickiness
+#        if ! stickiness=`crm_resource -g resource-stickiness -r $res --meta -Q 2>/dev/null`
+#        then
+#                # if no resource-specific stickiness is confiugured, use the default value
+#                stickiness="$default_stickiness"
+#        fi
+#
+#	# 3.4 sum score on the current node with stickness
+#
+#	# 3.5 if sum is lower than score for other nodes, than rsc is not running on the preferred node and there will be a "failback"
+#}
+checkresources() {
+       	pout "Resources Status"
+        reset_lstatus
+
+	# read ahead some info
+	NODES=$(getnodes)
+	RESOURCES=$(/usr/sbin/crm_resource -l)
+
+	local warnings n
+	# 1. check for not running resources
+	n=`checkrscstatus`
+	[ "$n" ] &&
+		warnings="${warnings} WARN: some resources are NOT running:\n${n}\n"
+
+	# 2. check for failcount for each resource
+	n=`checkrscfailcount`
+	[ "$n" ] &&
+		warnings="${warnings} WARN: some resources have failcount: $n"
+
+	if [ "$warnings" ] ; then
+		if echo $warnings | grep -qs 'INFINITY' ; then
+			set_status red
+		else
+			set_status yellow
+		fi
+		print_lstatus "${warnings}"
+	else
+		set_status green
+		print_lstatus
+	fi
+}
+
+checkfs() {
+       	pout "Filesystem Resources Configuration"
+        reset_lstatus
+	
+	# two things: Check if existing in fstab, check if device name is persistent
+	local list
+	local fstab=$(cat /etc/fstab  | awk -F " " '{print $2}')
+	for r in `cibadmin -Q | grep Filesystem | grep primitive | awk '{for (i=1;i<=NF;i++) if ($i ~ /id=/) print $i }' | cut -d '"' -f2 2>/dev/null` ; do
+		local m=$(crm_resource -r $r -g directory 2>/dev/null)
+		if echo $fstab | grep -wqs $m 2>/dev/null ; then
+			list="$list $m"
+		fi
+	done
+
+	if [ "$list" ] ; then
+		set_status red
+		print_lstatus " WARN: filesystem(s) managed by the cluster is also defined in /etc/fstab\n${list}"
+	else
+		set_status green
+		print_lstatus
+	fi
+}
+checknetwork() {
+       	pout "Network Redundancy"
+        reset_lstatus
+	
+	local warnings
+	
+	# check for bonding
+	local bonding
+	if lsmod | grep -qs 'bonding' ; then
+		for i in `ls /etc/sysconfig/network/ifcfg-*` ; do 
+			if grep -qs 'BONDING_MASTER' $i ; then
+				bonding="1"
+				local l m goodif
+				local l=$(echo $i | cut -d "-" -f2) 
+				local m=$(ifstatus $l 2>/dev/null | grep "^Slave Interface:" | wc -l)
+				local goodif=$(ifstatus $l 2>/dev/null | grep -A1 "^Slave Interface:" | grep "^MII Status:" | grep -i "up" | wc -l)
+				
+				# local bstatus=$(ifstatus $l 2>/dev/null | grep -A1 "^Slave Interface:")
+				[ "$goodif" -ne "$m" ] &&
+					warnings="${warnings} WARN: a slave of $l is down\n"
+				
+				[ "$goodif" -lt "2" ] &&
+					warnings="${warnings} WARN: $l has less than 2 interfaces active\n"
+			fi
+		done
+	fi
+		
+	# check for totem	
+	local totem f=/etc/corosync/corosync.conf
+	if [ -s "$f" ] ; then
+		if cat /etc/corosync/corosync.conf | grep rrp_mode | grep -qsv none ; then
+			totem="1"
+			
+			local cstatus=$(corosync-cfgtool -s)
+			
+			# ring in good status
+			local goodrings=$(echo "$cstatus" -s | grep "status.*=" | grep -v "^--$" | grep "no faults" | wc -l)
+
+			# all rings are in good status?
+			[ "$goodrings" -ne "2" ] &&
+				warnings="${warnings} WARN: a totem RING is FAULTY:\n\t${cstatus}\n"
+		
+		else
+			warnings="${warnings} WARN: redundancy not configured for TOTEM\n"
+		fi
+
+	fi
+		
+	if [ -z "$bonding" -a -z "$totem" ] ; then
+		set_status red
+		print_lstatus "ERROR: no network redundancy found\n"
+		return 1
+	fi
+
+	if [ "$warnings" ] ; then
+		set_status yellow
+		print_lstatus "${warnings}"
+	else
+		set_status green
+		print_lstatus
+	fi
+}
+listpkg() {
+	local n i a
+	echo -e "$1" |
+	while read line; do
+		if echo $line | grep -qs '^Name:' ; then
+				n=$(echo $line | cut -d " " -f2)
+			elif echo $line | grep -qs '^Version:' ; then
+				a=$(echo $line | cut -d " " -f2)
+			elif echo $line | grep -qs '^Status:' ; then
+				i=$(echo $line | cut -d " " -f4)
+				# output
+				echo -e " $n ( $i installed - $a available )"
+			fi	
+	done  
+}
+#checkupd() {
+#       	pout "Core Packages Version"
+#        reset_lstatus
+#	
+#	local PACKAGES="pacemaker libpacemaker3 
+#	pacemaker-pygui pacemaker-pymgmt pymgmt-client
+#	openais libopenais2 libopenais3 corosync libcorosync4
+#	resource-agents cluster-glue libglue2 ldirectord
+#	heartbeat heartbeat-common heartbeat-resources libheartbeat2
+#	ocfs2-tools ocfs2-tools-o2cb ocfs2console
+#	ocfs2-kmp-default ocfs2-kmp-pae ocfs2-kmp-xen ocfs2-kmp-debug ocfs2-kmp-trace
+#	drbd drbd-kmp-xen drbd-kmp-pae drbd-kmp-default drbd-kmp-debug drbd-kmp-trace
+#	drbd-heartbeat drbd-pacemaker drbd-utils drbd-bash-completion drbd-xen
+#	lvm2 lvm2-clvm cmirrord
+#	libdlm libdlm2 libdlm3
+#	hawk ruby lighttpd
+#	kernel-default kernel-pae kernel-xen
+#	glibc
+#	"
+#	
+#	# check if the system has been registered TODO: check if the right repo/ca is enable
+#	local list
+#	if zypper sl | grep -qsE 'nu.*novell.*com' ; then
+#		list=$(zypper info $PACKAGES)
+#	else
+#		set_status red
+#		print_lstatus " System seems to be not registered for updates"
+#		return	
+#	fi
+#
+#	# list packages which are not updated
+#	local l=$(echo -e "$list" | sed -n '/^Name:/p;/^Version:/p;/^Status:/p' | grep -B2 -i 'out-of-date' | sed '/^--/d' 2>/dev/null)
+#	if [ "$l" ] ; then 
+#		set_status yellow
+#		print_lstatus " WARN: packages are not up-to-date:\n$(listpkg "$l")"
+#	fi
+#}
+checkmpio() {
+       	pout "Multipath Configuration"
+        reset_lstatus
+
+	# 1. check if multipath module is loaded
+	if ! /sbin/lsmod | grep -qs dm_multipath ; then
+		set_status red
+		print_lstatus " WARN: multipath kernel module not loaded\n"
+		return 1
+	fi
+	
+	# 2. check for multipath devices
+	local tblnum=$(/sbin/dmsetup ls --target multipath | sed '/No devices/d' | wc -l)
+        if [ "$tblnum" -eq 0 ] ; then
+		set_status red
+		print_lstatus " WARN: multipath devices not found\n"
+		return 1
+	fi
+	
+	local warnings
+	# 3. check if daemons are active and running (boot.multipath and multipathd)
+	for i in multipathd boot.multipath boot.udev ; do
+		if chkconfig $i | grep -qs 'off' ; then
+			warnings="${warnings} WARN: daemon $i is not enabled\n"
+		fi
+	done
+	
+		
+	# 4. check if multipath.conf exist and in case extract default{} section from it
+	if [ -s /etc/multipath.conf ] ; then
+		local defaults=$(cat /etc/multipath.conf.defaults | sed -n '/^defaults/,/}/p')
+		# 4.1 check for failback setting. In HA environements it should be "manual"
+		if echo $defaults | grep failback | grep -qsv manual ; then
+			warnings="${warnings} WARN: failback is NOT \"manual\"\n"
+		fi
+		# 4.2 check for no_path_retry setting. In HA environments it should be "fail" or "0"
+		if echo $defaults | grep no_path_retry | grep -Eqsv 'fail|0' ; then
+			warnings="${warnings} WARN: no_path_retry is neither \"fail\" nor \"0\"\n"
+		fi
+		# 4.3 check if friendly names are used
+		if echo $defaults | grep user_friendly_names | grep -qs yes ; then
+			local bfile bpart
+			if echo $defaults | grep -qs bindings_file | grep -qs ; then
+				bfile=$(echo $defaults | awk -F ' ' '{print $2}' | sed 's/"//g')
+			else
+				bfile=/var/lib/multipath/bindings # TODO it might be changed to /etc.. recently
+			fi
+			bpart=$(df -T $bfile | tail -n 1 | awk -F ' ' '{print $7}')
+			[ "$bpart" == "/" ] && 
+				warnings="${warnings} WARN: bindings file is NOT on the system root device\n"
+
+			if cat /etc/sysconfig/kernel 2>/dev/null | grep -qs ^INITRD_FEATURES= | grep mpath ; then
+				if ! cat /proc/cmdline | grep -qs multipath=off ; then
+					warnings="${warnings} WARN: multipath is into the initrd\n"
+				fi
+			fi
+		fi
+	fi
+					
+			
+	# TODO check for failed paths
+
+	if [ "$warnings" ] ; then
+		set_status yellow
+		print_lstatus "${warnings}"
+	else
+		set_status green
+		print_lstatus
+	fi
+}
+checkbasics() {
+	
+	# read ahead some info
+	CRMMON=$(crm_mon -r -1)
+	NODES=$(getnodes)
+	RESOURCES=$(/usr/sbin/crm_resource -l)
+	
+	checkquorum
+	checkstonith
+	checkresources
+	checkfs
+	checknetwork
+	checkmpio
+
+	# TODO: crm_attribute -Q -G -n maintenance-mode
+}
+
+######
+#### final part
+##
+finalize() {
+	if [ ! $SAVE_HB_REPORT ] ; then
+		rm -rf 	$REPORT_DIR
+		REPORT_DIR="not saved"
+	fi
+}
+
+######
+#### ok lets run something now
+##
+	while getopts f:d:hva o ; do
+	case "$o" in
+		d) REPORT_DIR="$OPTARG/hb_report";;
+		h) usage;;
+	        v) version;;
+		*) usage;;
+	esac
+done
+
+haverify
+setvars
+setreportargs
+createreport
+header
+checkreport
+checkbasics
+finalize
+# do we want to be extensible?
+#[ "$(ls -A /etc/hahealth/plugins/*.plugin)" ] && . /etc/hahealth/plugins/*.plugin
+footer
+
+exit 0

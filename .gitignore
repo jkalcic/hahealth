@@ -1,0 +1,6 @@
+*.orig
+*.swp
+*.bak
+*~
+*.o
+*.tmp

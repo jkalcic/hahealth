@@ -1,0 +1,53 @@
+.\" Manpage for hahealth.
+.\" Contact jkalcic@suse.com to correct errors or typos.
+.TH man 1 "25 March 2013" "1.0" "hahealth man page"
+.SH NAME
+hahealth \- perform basic health check for Linux-HA clusters
+.SH SYNOPSIS
+hahealth [options]
+.SH DESCRIPTION
+hahealth(1) is a tool to perform basic health check against the core components of a Linux-HA clusters, at several layer of the high availability stack (storage, cluster communication, resources management).
+It collects spread information regarding to the high availability of the system, mainly but not only about the cluster software stack (Pacemaker), analyze them in order to expose the most common issues and report this all in a easy-to-read way.
+
+hahealth is based on hb_report from where it takes part of the information it shows up. By default, it creates a hb_report based on the last day from which it extracts the most relevant facts. The hb_report created is eventually left uncompressed in the current/working directory for further analysis. If the destination directory "hb_report" already exists, it is overrided. This behavior and other default options can be modified with file /etc/hahealth.conf
+
+The following the full list of the checks hahealth performs:
+
+.IP \[bu]
+Report Integrity. Check the integrity of the hb_report itself verifying the existence of file "analysis.txt".
+.IP \[bu]
+Core Files Comparison. Check for differences in core files among the cluster nodes. This info is extracted from hb_report's file "analysis.txt", refer to hb_report for further information.
+.IP \[bu]
+Core Files Permissions/Ownerwship. Check for permissions and ownership of core files. This info is extracted from hb_report's file "analysis.txt", refer to hb_report for further information.
+.IP \[bu]
+CIB consistency. Check for CIB consistency (crm_verify). This info is extraced from hb_report's file "analysys.txt", refer to hb_report for further information.
+.IP \[bu]
+Backtraces. Check for the existence of backtraces. This info is extraced from hb_report's file "analysys.txt", refer to hb_report for further information.
+.IP \[bu]
+Errors Log. Check the presence of errors log. This info is extraced from hb_report's file "analysys.txt", refer to hb_report for further information.
+.IP \[bu]
+Events Collection. Check the presence of relevant events. This info is extraced from hb_report's file "events.txt", refer to hb_report for further information.
+.IP \[bu]
+Quorum.    
+.IP \[bu]
+STONITH.
+.IP \[bu]
+Resources Status.
+.IP \[bu]
+Filesystem Resources Configuration.
+.IP \[bu]
+Network Redundancy.
+.IP \[bu]
+Multipath Configuration.
+.IP \[bu]
+
+.SH OPTIONS
+-d: hb_report destination directory. Default is current directory
+-h: help
+-v: print version
+.SH SEE ALSO
+hb_report(8)
+.SH BUGS
+No known bugs.
+.SH AUTHOR
+Jan Kalcic (jkalcic@suse.com)
