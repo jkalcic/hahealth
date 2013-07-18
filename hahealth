@@ -17,7 +17,7 @@
  # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  #
 
-VER="1.1"
+VER="1.2"
 HB_REPORT="/usr/sbin/hb_report"
 
 usage() {
@@ -697,6 +697,23 @@ listpkg() {
 #	[ "$l" ] && 
 #		info "packages are not up-to-date:\n$(listpkg "$l")"
 #}
+othermp() {
+	# here we check for the most common multipath softwares from third-party which _might_ be in use -> we do a very simple guess:
+	#
+	# IBM RDAC: lsmod | grep mppUpper
+	# EMC PowerPath: rpm -qa | grep EMCpower
+	# Veritas DMP: rpm -qa | grep VRTS 
+	# Fujitsu Siemens ETERNUS: rpm -qa | grep FJVS
+	# Hitachi HDLM:	rpm -qa | grep HDLM
+	# NEC PathManager: rpm -qa | grep sps-utils
+
+	local l="EMCpower|VRTS|FJVS|HDLM|sps-utils"
+	local m=$(rpm -qa | grep -E ${l})
+
+	[ "$m" ] || m=$(lsmod | grep -qs mppUpper)
+	
+	echo -e "$m"
+}
 checkmpio() {
        	pout "Multipath Configuration"
         reset_lstatus
@@ -705,6 +722,11 @@ checkmpio() {
 	# 1. check if multipath is in use, then continue only if Linux DM-MPIO is
 	if ! /sbin/lsmod | grep -qs dm_multipath ; then
 		warn "Linux DM-MPIO not in use"
+		local m=$(othermp)
+		if [ "$m" ] ; then
+			reset_log
+			info "DM-MPIO not in use, but it seems there's a third-party multipath solution:\n  ${m}"
+		fi
 		set_log
 		return
 	fi
