@@ -17,7 +17,7 @@
  # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  #
 
-VER="1.0"
+VER="1.1"
 HB_REPORT="/usr/sbin/hb_report"
 
 usage() {
@@ -52,6 +52,10 @@ haverify() {
 #### get and set variables
 ##
 setvars() {
+	# vars to message from checks
+	INFO=
+	WARNINGS=
+	
 	# reset status
 	GSTATUS="0"
 	
@@ -135,6 +139,25 @@ set_status() {
         	yellow)	 	LSTATUS=1; test $GSTATUS -lt $LSTATUS && GSTATUS=$LSTATUS ;;
 	        red)    	LSTATUS=2; test $GSTATUS -lt $LSTATUS && GSTATUS=$LSTATUS ;;
         esac
+}
+# functions to message from checks
+info() {
+	[ "$INFO" ] && INFO="${INFO}\n"
+	INFO="${INFO} INFO: $*"
+}
+warn() {
+	[ "$WARNINGS" ] && WARNINGS="${WARNINGS}\n"
+	WARNINGS="${WARNINGS} WARN: $*"
+}
+reset_log() {
+	WARNINGS=
+	INFO=
+}
+set_log() {
+	[ "$INFO" ] && set_status yellow
+	[ "$WARNINGS" ] && set_status red
+	[ "$INFO" -a "$WARNINGS" ] && WARNINGS="${WARNINGS}\n"
+	print_lstatus "${WARNINGS}${INFO}"
 }
 
 ######
@@ -222,7 +245,6 @@ createreport() {
 
 	echo $ARGS | xargs $HB_REPORT >/dev/null 2>&1 || error "Failed to create report"
 }
-
 ######
 #### all the checks below
 ##
@@ -237,12 +259,12 @@ checkdiff() {
 	for d in $diff; do
 		local dstatus="$(echo -e "$d" | cut -d " " -f 3)"
 		[ "$dstatus" != "OK" ] && [ "$dstatus" != "no" ] &&
-			differences="${differences}`echo $d | cut -d " " -f 2`"
+			differences="${differences}$(echo $d | cut -d " " -f 2 | sed -e 's/\.\.\.//g;s/^/\\n  /g')"
 	done
 
 	if [ "$differences" ] ; then
 		set_status red
-		print_lstatus " WARN: Some differences found ($differences)"
+		print_lstatus " WARN: Some differences found in files:${differences}\n INFO: See \"analysis.txt\" from hb_report"
 	else
 		set_status green
 		print_lstatus
@@ -253,11 +275,11 @@ checkperms() {
        	pout "Core Files Permissions/Ownerwship"
         reset_lstatus
 	
-	local perms=$(grep -A1 -E '^WARN: problem with permissions/ownership|^wrong permissions or ownership' $analysis | sed -e 's/^/ /' )
+	local perms=$(grep '^WARN: problem with permissions/ownership' $analysis | sed -e 's/^/ /;s/:$//')
 
 	if [ "$perms" ] ; then
 		set_status red
-		print_lstatus "$perms" 
+		print_lstatus "$perms\n INFO: See \"analysis.txt\" from hb_report" 
 	else
 		set_status green 
 		print_lstatus
@@ -267,26 +289,25 @@ checkcrmverify() {
        	pout "CIB consistency"
         reset_lstatus
 	
-	local crmver=$(grep -E '^WARN: crm_verify|^crm_verify' $analysis | sed -e 's/^/ /' )
+	local crmver=$(grep -E '^WARN: crm_verify' $analysis | sed -e 's/^/ /;s/:$//' )
 
 	if [ "$crmver" ] ; then
 		set_status red
-		print_lstatus "$crmver" 
+		print_lstatus "$crmver\n INFO: See \"analysis.txt\" from hb_report" 
 	else
 		set_status green 
 		print_lstatus
 	fi
-
 }
 checktraces() {
        	pout "Backtraces"
         reset_lstatus
 	
-	local traces=$(grep -E '^WARN: coredumps found at|Core was generated|Program terminated' $analysis | sed -e 's/^/ /' )
+	local traces=$(grep '^WARN: coredumps found at' $analysis | sed -e 's/^/ /' )
 
 	if [ "$traces" ] ; then
 		set_status red
-		print_lstatus "$traces" 
+		print_lstatus "$traces\n INFO: See \"analysis.txt\" from hb_report" 
 	else
 		set_status green 
 		print_lstatus
@@ -300,7 +321,7 @@ checkerrors() {
 
 	if [ "$error" -gt "0" ] ; then
 		set_status red
-		print_lstatus " WARN: $error errors found. Check file \"analysis.txt\" from hb_report"
+		print_lstatus " WARN: $error errors found\n INFO: See \"analysis.txt\" from hb_report"
 	else
 		set_status green 
 		print_lstatus
@@ -318,7 +339,7 @@ checkevents() {
 	elif [ -s $f ] ; then
 		set_status yellow
 		local events=$(cat $f 2>/dev/null | wc -l)
-		print_lstatus " INFO: $events events found. Check file \"events.txt\" from hb_report"
+		print_lstatus " INFO: $events events found\n INFO: See \"events.txt\" from hb_report"
 	else
 		set_status green 
 		print_lstatus
@@ -333,7 +354,7 @@ checkreport() {
 	if [ ! -s "$analysis" ] ; then 
 		set_status red 
 		print_lstatus " ERROR: file \"analysis.txt\" not found! Checks on hb_report will be skipped" 
-		return
+		return 1
 	else
 		set_status green 
 		print_lstatus 
@@ -355,137 +376,111 @@ checkreport() {
 checkquorum() {
        	pout "Quorum"
         reset_lstatus
+	reset_log
 	
-	local warnings
-
 	# 1. check for quorum misconfguration in a two-nodes cluster
 	local qpolicy=$(crm_attribute -Q -G -n no-quorum-policy 2>/dev/null) 
 	[ "$qpolicy" ] || qpolicy="stop"
 
 	local nodesnum=$(echo -e "$NODES" | wc -w)
-
 	if [ "$nodesnum" -lt "3" -a "$qpolicy" != "ignore" ] ; then 
-                warnings="${warnings} WARN: no-quorum-policy=\"${qpolicy}\" set for a two-nodes cluster (should be \"ignore\")\n"
+                warn "no-quorum-policy=\"${qpolicy}\" set for a two-nodes cluster"
 	fi
 
 	# 2. check for quorum status
 	if ! echo $CRMMON | grep -qs 'with quorum' ; then 
-		warnings="${warnings} WARN: cluster partition is WITHOUT quorum\n"
+		warn "cluster partition is WITHOUT quorum"
 	fi
 
 	# 3. notify if a node is not available
 	local y n
         for i in $NODES ; do
 		if echo "$CRMMON" | grep -E '^Online|online$' | grep -qs $i ; then
-			y="${y} ${i}"
+			y="  ${y}\n  ${i}"
 		else
-			n="${n} ${i}"
+			n="  ${n}\n  ${i}"
 		fi
 	done
         if [ "$n" ] ; then
-		warnings="${warnings} INFO: nodes in this cluster partition:$y\n"
-		warnings="${warnings} INFO: nodes NOT in this cluster partition:$n"
+		info "nodes in this cluster partition:$y"
+		info "nodes NOT in this cluster partition:$n"
 	fi
 
-	if [ "$warnings" ] ; then
-		set_status red
-		print_lstatus "${warnings}"
-	else
-		set_status green
-		print_lstatus
-	fi
+	set_log
 }
 checkstonith() {
        	pout "STONITH"
         reset_lstatus
+	reset_log
 
-	# 1. first, make sure stonith is enabled. Else we are done..
+	# 1. first, make sure stonith is enabled.
 	local s=$(crm_attribute -Q -G -n stonith-enabled 2>/dev/null)
-	if [ "$s" == "false" ] ; then
-		set_status red 
-		print_lstatus " WARN: stonith disabled!\n"
-		return 1
-	fi
+	[ "$s" == "false" ] &&
+		warn "stonith disabled"
 	
-	local warnings
-
 	# 2. check for stonith-action and warns if set to a non-default value, which is poweroff
 	if crm_attribute -Q -G -n stonith-action >/dev/null 2>&1 ; then
-                warnings=" WARN: stonith-action set to poweroff\n"
+                info "stonith-action set to poweroff"
 	fi
 
-	# 3. get stonith-timeout. needed later to verify timeouts mismatch 
-	if crm_attribute -Q -G -n stonith-timeout >/dev/null 2>&1 ; then
-		s_timeout=$(crm_attribute -Q -G -n stonith-timeout | sed -e s/[a-zA-Z]$//g)
-	else 
-		s_timeout="60"
-	fi
-	
-	# 4. recommened node fencing in use?  TODO some checks for other fencing methods as well
+	# 3. recommened node fencing in use? If not we are done..
+	# TODO some checks for other fencing methods as well
 	local conf=/etc/sysconfig/sbd
 	if [ ! -s "$conf" ] ; then
-                warnings="${warnings} WARN: SBD fencing (recommended) not in use\n"
-		set_status yellow 
-		print_lstatus "${warnings}"
+                info "SBD fencing (recommended) not in use"
+		# finish with the checks for STONITH here
+		# TODO some checks for other fencing methods as well
+		set_log
 		return 1
 	fi
 
-	# 5. config file contains device?
+	# 4. config file contains device?
         SBD=$(awk -F"=" '$1=="SBD_DEVICE" {print $2}' $conf | tr -d "\""|tr ";" "\n" )
 	if [ ! "$SBD" ] ; then
-                warnings="${warnings} WARN: SBD device not specified in ${conf}\n"
-		set_status red
-		print_lstatus "${warnings}"
-		return 1
+                warn "SBD device not specified in ${conf}"
+	else
+		# some other checks for each SBD device
+		for d in $SBD ; do
+			
+			# 4.1 udev symlinks are used?
+			[ $(echo $d | cut -d "/" -f1,2,3) == "/dev/disk" ] ||
+	                	warn "udev symlink not in use for device:\n  $d"
+		
+			# 4.2 TBD device is accessible?
+			if [ ! -b $d ] ; then
+        	        	warn "could not find SBD device:\n  $d"
+				break
+			fi
+		
+			# 4.3 timeout mismatch? (stonith-timeout should never be less than 120% of msgwait)
+			if crm_attribute -Q -G -n stonith-timeout >/dev/null 2>&1 ; then
+				s_timeout=$(crm_attribute -Q -G -n stonith-timeout | sed -e s/[a-zA-Z]$//g)
+			else 
+				s_timeout="60"
+			fi
+		
+			timeouts=$(sbd -d $d dump | grep -E 'watchdog|msgwait' | cut -d":" -f2 | sed -e 's/ //g')
+			watchdog=$(echo $timeouts | cut -d " " -f1)
+			msgwait=$(echo $timeouts | cut -d " " -f2)
+
+			[ "$s_timeout" -ge $(((( ${msgwait} /10 ) *2 ) + $msgwait )) ] ||
+				warn "stonith-timeout too low for SBD timeouts:\n  stonith-timeout :\t${s_timeout}\n  Timeout (watchdog) :\t${watchdog}\n  Timeout (msgwait) :\t${msgwait}"
+		done
+	
 	fi
 
-	# 6. some checks for each SBD device
-	for d in $SBD ; do
-		
-		# 6.1 TBD device is accessible?
-		if [ ! -b $d ] ; then
-                	warnings="${warnings} WARN: SBD device not found:\n $d\n"
-			set_status red
-			print_lstatus "${warning}"
-			return 1
-		fi
-		
-		# 6.2 udev symlinks are used?
-		[ $(echo $d | cut -d "/" -f1,2,3) == "/dev/disk" ] ||
-                	warnings="${warnings} WARN: udev symlink not in use:\n\t$d\n"
-	
-		# 6.3 timeouts mismatch? (stonith-timeout should never be less than 120% of msgwait)
-		timeouts=$(sbd -d $d dump | grep -E 'watchdog|msgwait' | cut -d":" -f2 | sed -e 's/ //g')
-		watchdog=$(echo $timeouts | cut -d " " -f1)
-		msgwait=$(echo $timeouts | cut -d " " -f2)
-
-		[ "$s_timeout" -ge $(((( ${msgwait} /10 ) *2 ) + $msgwait )) ] ||
-			warnings="${warnings} WARN: stonith-timeout too low for SBD timeouts:\n\tstonith-timeout :\t${s_timeout}\n\tTimeout (watchdog) :\t${watchdog}\n\tTimeout (msgwait) :\t${msgwait}\n"
-	done
-
-	# 7. softdog module is loaded
+	# 5. softdog module is loaded
 	if ! lsmod | grep -qs 'softdog' ; then
-		warnings="${warnings} WARN: softdog module not loaded, is a watchdog in use?\n"
+		info "softdog module not loaded, is a watchdog in use?"
 	fi
 	
-	# 8. verify external/sbd STONITH agent is running
+	# 6. verify external/sbd STONITH agent is running
 	local agent=$(crm_mon -r -1 | grep "(stonith:external/sbd)")
 	agent=$(echo "$agent" | grep "Started")
-	if [ ! "$agent" ] ; then
-               	warnings="${warnings} WARN: external/sbd STONITH agent is not running\n"
-		set_status red
-		print_lstatus "${warnings}"
-		return 1
-	fi
+	[ ! "$agent" ] &&
+               	warn "external/sbd STONITH agent is not running"
 
-	# 9. final output
-	if [ "$warnings" ] ; then
-		set_status yellow
-		print_lstatus "${warnings}"
-	else
-		set_status green
-		print_lstatus
-	fi
+	set_log
 }
 getnodes() { 
 	cibadmin -Ql -o nodes | awk '
@@ -500,24 +495,23 @@ getnodes() {
 	          }
 	        ' | tr '\n' ' '
 }
-checkrscstatus() {
+rscstatus() {
 	local rlist s 
 	local b=/usr/sbin/crm_resource
 	for r in $RESOURCES ; do
 		# crm_resource output is empty when rsc is not running. Weird handling (bug?) of sterr and stout
 		s=$($b -W -r $r -Q 2>/dev/null)
-		[ "$s" ] || rlist="${rlist} ${r}"
+		[ "$s" ] || rlist="${rlist}  ${r}\n"
 	done  
-	echo -e "$rlist"	
+	echo -e "$rlist"
 }
-checkrscfailcount() {
+rscfailcount() {
 	local b=/usr/sbin/crm_failcount
         for n in $NODES ; do
                 for r in $RESOURCES ; do
                         failcount=$($b -G -U $n -r $r | awk -F= '{ for(i=1; i<NF; i++) { if ( $i ~ /value/ ) { i++; print $i; }}}' )
 			if [ "$failcount" != "0" ] ; then
-	                        echo -ne "\n ${r} : "
-	                        echo -e "$failcount on ${n}\n"
+	                        echo -e "  ${r} : ${failcount} on ${n}"
 			fi
                 done
         done
@@ -561,38 +555,29 @@ checkrscfailcount() {
 checkresources() {
        	pout "Resources Status"
         reset_lstatus
+	reset_log
 
 	# read ahead some info
 	NODES=$(getnodes)
 	RESOURCES=$(/usr/sbin/crm_resource -l)
 
-	local warnings n
 	# 1. check for not running resources
-	n=`checkrscstatus`
+	local n=`rscstatus`
 	[ "$n" ] &&
-		warnings="${warnings} WARN: some resources are NOT running:\n${n}\n"
+		info "some resources are NOT running:\n${n}"
 
 	# 2. check for failcount for each resource
-	n=`checkrscfailcount`
+	n=`rscfailcount`
 	[ "$n" ] &&
-		warnings="${warnings} WARN: some resources have failcount: $n"
+		warn "some resources have failcount: \n${n}"
 
-	if [ "$warnings" ] ; then
-		if echo $warnings | grep -qs 'INFINITY' ; then
-			set_status red
-		else
-			set_status yellow
-		fi
-		print_lstatus "${warnings}"
-	else
-		set_status green
-		print_lstatus
-	fi
+	set_log
 }
 
 checkfs() {
        	pout "Filesystem Resources Configuration"
         reset_lstatus
+	reset_log
 	
 	# two things: Check if existing in fstab, check if device name is persistent
 	local list
@@ -604,19 +589,15 @@ checkfs() {
 		fi
 	done
 
-	if [ "$list" ] ; then
-		set_status red
-		print_lstatus " WARN: filesystem(s) managed by the cluster is also defined in /etc/fstab\n${list}"
-	else
-		set_status green
-		print_lstatus
-	fi
+	[ "$list" ] &&
+		warn "filesystem(s) managed by the cluster is also defined in /etc/fstab\n${list}"
+	
+	set_log
 }
 checknetwork() {
        	pout "Network Redundancy"
         reset_lstatus
-	
-	local warnings
+	reset_log
 	
 	# check for bonding
 	local bonding
@@ -631,10 +612,10 @@ checknetwork() {
 				
 				# local bstatus=$(ifstatus $l 2>/dev/null | grep -A1 "^Slave Interface:")
 				[ "$goodif" -ne "$m" ] &&
-					warnings="${warnings} WARN: a slave of $l is down\n"
+					warn "a slave of $l is down"
 				
 				[ "$goodif" -lt "2" ] &&
-					warnings="${warnings} WARN: $l has less than 2 interfaces active\n"
+					warn "$l has less than 2 interfaces active"
 			fi
 		done
 	fi
@@ -652,27 +633,18 @@ checknetwork() {
 
 			# all rings are in good status?
 			[ "$goodrings" -ne "2" ] &&
-				warnings="${warnings} WARN: a totem RING is FAULTY:\n\t${cstatus}\n"
+				warn "a totem RING is FAULTY:\n\t${cstatus}"
 		
 		else
-			warnings="${warnings} WARN: redundancy not configured for TOTEM\n"
+			warn "redundancy not configured for TOTEM"
 		fi
 
 	fi
 		
-	if [ -z "$bonding" -a -z "$totem" ] ; then
-		set_status red
-		print_lstatus "ERROR: no network redundancy found\n"
-		return 1
-	fi
+	[ -z "$bonding" -a -z "$totem" ] &&
+		warn "no network redundancy found"
 
-	if [ "$warnings" ] ; then
-		set_status yellow
-		print_lstatus "${warnings}"
-	else
-		set_status green
-		print_lstatus
-	fi
+	set_log
 }
 listpkg() {
 	local n i a
@@ -690,8 +662,9 @@ listpkg() {
 	done  
 }
 #checkupd() {
-#       	pout "Core Packages Version"
+#        pout "Core Packages Version"
 #        reset_lstatus
+#	 reset_log
 #	
 #	local PACKAGES="pacemaker libpacemaker3 
 #	pacemaker-pygui pacemaker-pymgmt pymgmt-client
@@ -714,42 +687,40 @@ listpkg() {
 #	if zypper sl | grep -qsE 'nu.*novell.*com' ; then
 #		list=$(zypper info $PACKAGES)
 #	else
-#		set_status red
-#		print_lstatus " System seems to be not registered for updates"
+#		warn "System seems to be not registered for updates"
+#		set_log
 #		return	
 #	fi
 #
 #	# list packages which are not updated
 #	local l=$(echo -e "$list" | sed -n '/^Name:/p;/^Version:/p;/^Status:/p' | grep -B2 -i 'out-of-date' | sed '/^--/d' 2>/dev/null)
-#	if [ "$l" ] ; then 
-#		set_status yellow
-#		print_lstatus " WARN: packages are not up-to-date:\n$(listpkg "$l")"
-#	fi
+#	[ "$l" ] && 
+#		info "packages are not up-to-date:\n$(listpkg "$l")"
 #}
 checkmpio() {
        	pout "Multipath Configuration"
         reset_lstatus
+	reset_log
 
-	# 1. check if multipath module is loaded
+	# 1. check if multipath is in use, then continue only if Linux DM-MPIO is
 	if ! /sbin/lsmod | grep -qs dm_multipath ; then
-		set_status red
-		print_lstatus " WARN: multipath kernel module not loaded\n"
-		return 1
+		warn "Linux DM-MPIO not in use"
+		set_log
+		return
 	fi
 	
 	# 2. check for multipath devices
 	local tblnum=$(/sbin/dmsetup ls --target multipath | sed '/No devices/d' | wc -l)
         if [ "$tblnum" -eq 0 ] ; then
-		set_status red
-		print_lstatus " WARN: multipath devices not found\n"
-		return 1
+		warn "DM-MPIO devices not found"
+		set_log
+		return
 	fi
 	
-	local warnings
 	# 3. check if daemons are active and running (boot.multipath and multipathd)
 	for i in multipathd boot.multipath boot.udev ; do
 		if chkconfig $i | grep -qs 'off' ; then
-			warnings="${warnings} WARN: daemon $i is not enabled\n"
+			warn "daemon $i is not enabled"
 		fi
 	done
 	
@@ -759,11 +730,11 @@ checkmpio() {
 		local defaults=$(cat /etc/multipath.conf.defaults | sed -n '/^defaults/,/}/p')
 		# 4.1 check for failback setting. In HA environements it should be "manual"
 		if echo $defaults | grep failback | grep -qsv manual ; then
-			warnings="${warnings} WARN: failback is NOT \"manual\"\n"
+			warn "failback is NOT \"manual\"\n"
 		fi
 		# 4.2 check for no_path_retry setting. In HA environments it should be "fail" or "0"
 		if echo $defaults | grep no_path_retry | grep -Eqsv 'fail|0' ; then
-			warnings="${warnings} WARN: no_path_retry is neither \"fail\" nor \"0\"\n"
+			warn "no_path_retry is neither \"fail\" nor \"0\""
 		fi
 		# 4.3 check if friendly names are used
 		if echo $defaults | grep user_friendly_names | grep -qs yes ; then
@@ -775,26 +746,17 @@ checkmpio() {
 			fi
 			bpart=$(df -T $bfile | tail -n 1 | awk -F ' ' '{print $7}')
 			[ "$bpart" == "/" ] && 
-				warnings="${warnings} WARN: bindings file is NOT on the system root device\n"
+				warn "bindings file is NOT on the system root device"
 
 			if cat /etc/sysconfig/kernel 2>/dev/null | grep -qs ^INITRD_FEATURES= | grep mpath ; then
 				if ! cat /proc/cmdline | grep -qs multipath=off ; then
-					warnings="${warnings} WARN: multipath is into the initrd\n"
+					warn "multipath is into the initrd"
 				fi
 			fi
 		fi
 	fi
-					
-			
-	# TODO check for failed paths
-
-	if [ "$warnings" ] ; then
-		set_status yellow
-		print_lstatus "${warnings}"
-	else
-		set_status green
-		print_lstatus
-	fi
+	
+	set_log
 }
 checkbasics() {
 	
